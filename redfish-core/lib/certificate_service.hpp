@@ -43,6 +43,8 @@ constexpr const char* httpsObjectPath =
 constexpr const char* ldapObjectPath = "/xyz/openbmc_project/certs/client/ldap";
 constexpr const char* authorityObjectPath =
     "/xyz/openbmc_project/certs/authority/ldap";
+constexpr const char* systemsObjectPath =
+    "/xyz/openbmc_project/certs/systems";
 } // namespace certs
 
 /**
@@ -1233,4 +1235,112 @@ inline void requestRoutesTrustStoreCertificate(App& app)
         .methods(boost::beast::http::verb::delete_)(
             std::bind_front(handleTrustStoreCertificateDelete, std::ref(app)));
 } // requestRoutesTrustStoreCertificate
+
+inline void requestRoutesSystemCertificate(App& app)
+{
+    BMCWEB_ROUTE(
+        app,
+        "/redfish/v1/Systems/<str>/Certificates/<str>/")
+        .privileges(redfish::privileges::getCertificate)
+        .methods(
+            boost::beast::http::verb::
+                get)([&app](const crow::Request& req,
+                            const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                            const std::string& systemId,
+                            const std::string& certId) -> void {
+            if (!redfish::setUpRedfishRoute(app, req, asyncResp))
+            {
+                return;
+            }
+
+            if (systemId.empty() || certId.empty())
+            {
+                messages::internalError(asyncResp->res);
+                return;
+            }
+
+            // GetSubTree on interfaces which provide info about certificate.
+            constexpr std::array<std::string_view, 1> interfaces = {
+                        "xyz.openbmc_project.Certs.Certificate"};
+
+            dbus::utility::getSubTree(
+                "/xyz/openbmc_project/certs/systems/", 0, interfaces,
+                [asyncResp, systemId, certId](
+                    const boost::system::error_code& ec,
+                    const dbus::utility::MapperGetSubTreeResponse& subtree) {
+                if (ec)
+                {
+                    BMCWEB_LOG_DEBUG << "DBUS response error: " << ec;
+                    messages::internalError(asyncResp->res);
+                    return;
+                }
+
+                
+                const boost::urls::url certURL = boost::urls::format(
+                    "/redfish/v1/Systems/{}/Certificates/{}", systemId, certId);
+
+                std::string certPath = certs::systemsObjectPath;
+                certPath += "/" + systemId + "/" + certId;
+
+                for (const auto& [objectPath, serviceMap] : subtree)
+                {
+                    // Ignore any objects which don't match certPath
+                    if (objectPath.find(certPath) == std::string::npos)
+                    {
+                        continue;
+                    }
+
+                    // Should only match one service and one cert object
+                    for (const auto& [serviceName, interfaceList] : serviceMap)
+                    {
+                        getCertificateProperties(asyncResp, certPath,
+                                         serviceName, certId, certURL,
+                                         "Systems Certificate");
+                    }
+                }
+            });
+        });
+} // requestRoutesSystemCertificate
+
+/**
+ * Collection of System certificates
+ */
+inline void requestRoutesSystemCertificateCollection(App& app)
+{
+    BMCWEB_ROUTE(app,
+                 "/redfish/v1/Systems/<str>/Certificates/")
+        .privileges(redfish::privileges::getCertificateCollection)
+        .methods(boost::beast::http::verb::get)([&app](const crow::Request& req,
+                                                       const std::shared_ptr<
+                                                           bmcweb::AsyncResp>&
+                                                           asyncResp,
+                                                       const std::string&
+                                                           systemId) {
+            boost::urls::url url = boost::urls::format(
+                "redfish/v1/Systems/{}/Certificates", systemId);
+
+            constexpr std::array<std::string_view, 1> certInterfaces = {
+                        "xyz.openbmc_project.Certs.Certificate"};
+
+            if (!redfish::setUpRedfishRoute(app, req, asyncResp))
+            {
+                return;
+            }
+
+            asyncResp->res.jsonValue = {
+                {"@odata.id",
+                 "/redfish/v1/Systems/<str>/Certificates"},
+                {"@odata.type", "#CertificateCollection.CertificateCollection"},
+                {"Name", "Systems Certificates Collection"},
+                {"Description", "A Collection of systems certificate instances"}};
+
+            collection_util::getCollectionMembers(
+                asyncResp,
+                url,
+                certInterfaces,
+                 "/xyz/openbmc_project/certs/systems/");
+        });
+
+} // requestRoutesSystemCertificateCollection
+
 } // namespace redfish
