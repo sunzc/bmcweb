@@ -129,6 +129,8 @@ include_list = [
     "ThermalSubsystem",
     "Triggers",
     "TriggersCollection",
+    "TrustedComponent",
+    "TrustedComponentCollection",
     "UpdateService",
     "VirtualMedia",
     "VirtualMediaCollection",

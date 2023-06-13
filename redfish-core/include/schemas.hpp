@@ -123,6 +123,8 @@ namespace redfish
         "ThermalSubsystem",
         "Triggers",
         "TriggersCollection",
+        "TrustedComponent",
+        "TrustedComponentCollection",
         "UpdateService",
         "VirtualMedia",
         "VirtualMediaCollection",
