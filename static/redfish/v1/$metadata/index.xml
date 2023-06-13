@@ -3155,6 +3155,13 @@
     <edmx:Reference Uri="/redfish/v1/schema/TriggersCollection_v1.xml">
         <edmx:Include Namespace="TriggersCollection"/>
     </edmx:Reference>
+    <edmx:Reference Uri="/redfish/v1/schema/TrustedComponent_v1.xml">
+        <edmx:Include Namespace="TrustedComponent"/>
+        <edmx:Include Namespace="TrustedComponent.v1_0_0"/>
+    </edmx:Reference>
+    <edmx:Reference Uri="/redfish/v1/schema/TrustedComponentCollection_v1.xml">
+        <edmx:Include Namespace="TrustedComponentCollection"/>
+    </edmx:Reference>
     <edmx:Reference Uri="/redfish/v1/schema/UpdateService_v1.xml">
         <edmx:Include Namespace="UpdateService"/>
         <edmx:Include Namespace="UpdateService.v1_0_0"/>
