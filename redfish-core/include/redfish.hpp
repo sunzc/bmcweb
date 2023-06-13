@@ -54,6 +54,7 @@
 #include "thermal.hpp"
 #include "thermal_subsystem.hpp"
 #include "trigger.hpp"
+#include "trusted_component.hpp"
 #include "update_service.hpp"
 #include "virtual_media.hpp"
 
@@ -112,6 +113,8 @@ class RedfishService
         requestRoutesChassisResetActionInfo(app);
         requestRoutesChassisDrive(app);
         requestRoutesChassisDriveName(app);
+        requestRoutesTrustedComponentCollection(app);
+        requestRoutesTrustedComponent(app);
         requestRoutesUpdateService(app);
         requestRoutesStorageCollection(app);
         requestRoutesStorage(app);
