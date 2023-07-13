@@ -45,8 +45,7 @@ namespace redfish
 {
 // Interfaces which imply a D-Bus object represents a ComponentIntegrity
 constexpr std::array<std::string_view, 2> componentInterfaces = {
-    "xyz.openbmc_project.Inventory.Item.Rot",
-    "xyz.openbmc_project.ComponentIntegrity"};
+    "xyz.openbmc_project.Inventory.Decorator.ComponentIntegrity"};
 
 using ComponentIntegrityGetParamsVariant =
     std::variant<std::monostate, bool, std::string,
@@ -94,9 +93,8 @@ inline std::optional<nlohmann::json> mapObjectPathVector(
 }
 
 inline std::optional<nlohmann::json>
-    getTrustedComponent(const sdbusplus::message::object_path& componentPath)
+    getTrustedComponent(const std::string& dbusPath)
 {
-    const std::string& dbusPath = componentPath.str;
     nlohmann::json::object_t trustedComponent;
     std::string chassis;
     std::string component;
@@ -171,7 +169,7 @@ inline void getComponentIntegrityData(std::shared_ptr<bmcweb::AsyncResp> aResp,
     BMCWEB_LOG_DEBUG << "Get ComponentIntegrity Data";
     sdbusplus::asio::getAllProperties(
         *crow::connections::systemBus, service, objPath,
-        "xyz.openbmc_project.ComponentIntegrity",
+        "xyz.openbmc_project.Inventory.Decorator.ComponentIntegrity",
         [objPath, aResp{std::move(aResp)}](
             const boost::system::error_code& ec,
             const std::vector<std::pair<std::string, ComponentIntegrityGetParamsVariant>> & properties) {
@@ -186,14 +184,13 @@ inline void getComponentIntegrityData(std::shared_ptr<bmcweb::AsyncResp> aResp,
         const std::string* type = nullptr;
         const std::string* typeVersion = nullptr;
         const std::string* lastUpdated = nullptr;
-        const sdbusplus::message::object_path* targetComponentURI = nullptr;
-        const std::vector<sdbusplus::message::object_path>* componentsProtected = nullptr;
+        //const std::string* targetComponentURI = nullptr;
+        //const std::vector<sdbusplus::message::object_path>* componentsProtected = nullptr;
 
         const bool success = sdbusplus::unpackPropertiesNoThrow(
             dbus_utils::UnpackErrorPrinter(), properties, "Enabled",
             enabled, "Type", type, "TypeVersion", typeVersion,
-            "LastUpdated", lastUpdated, "TargetComponentURI",
-            targetComponentURI, "ComponentsProtected", componentsProtected);
+            "LastUpdated", lastUpdated);
 
         if (!success)
         {
@@ -211,11 +208,11 @@ inline void getComponentIntegrityData(std::shared_ptr<bmcweb::AsyncResp> aResp,
 
         if ((type != nullptr) && !type->empty())
         {
-            if (*type == "xyz.openbmc_project.ComponentIntegrity.SecurityTechnologyType.SPDM")
+            if (*type == "xyz.openbmc_project.Inventory.Decorator.ComponentIntegrity.SecurityTechnologyType.SPDM")
                 aResp->res.jsonValue["ComponentIntegrityType"] = "SPDM";
-            else if (*type == "xyz.openbmc_project.ComponentIntegrity.SecurityTechnologyType.TPM")
+            else if (*type == "xyz.openbmc_project.Inventory.Decorator.ComponentIntegrity.SecurityTechnologyType.TPM")
                 aResp->res.jsonValue["ComponentIntegrityType"] = "TPM";
-            else if (*type == "xyz.openbmc_project.ComponentIntegrity.SecurityTechnologyType.OEM")
+            else if (*type == "xyz.openbmc_project.Inventory.Decorator.ComponentIntegrity.SecurityTechnologyType.OEM")
                 aResp->res.jsonValue["ComponentIntegrityType"] = "OEM";
             else {
                 messages::internalError(aResp->res);
@@ -233,29 +230,48 @@ inline void getComponentIntegrityData(std::shared_ptr<bmcweb::AsyncResp> aResp,
             aResp->res.jsonValue["LastUpdated"] = *lastUpdated;
         }
 
-        if (targetComponentURI != nullptr)
-        {
-            std::optional<nlohmann::json> targetComponent =
-                getTrustedComponent(*targetComponentURI);
-            if (!targetComponent)
+        // Get the trusted components for this component integrity object.
+        std::string targetComponentPath = objPath + "/reporting";
+        dbus::utility::getAssociationEndPoints(
+            targetComponentPath,
+            [aResp](
+                const boost::system::error_code& e,
+                const dbus::utility::MapperEndPoints& nodeTrustedComponentList) {
+            if (e)
             {
-                messages::internalError(aResp->res);
-                return;
+                if (e.value() != EBADR)
+                {
+                    messages::internalError(asyncResp->res);
+                    return;
+                }
             }
-            aResp->res.jsonValue["TargetComponentURI"] = *targetComponent;
-        }
+            BMCWEB_LOG_DEBUG << "Finishing with " << nodeTrustedComponentList->size();
 
-        if ((componentsProtected != nullptr))
-        {
-            std::optional<nlohmann::json> components =
-                mapObjectPathVector("Systems", "", *componentsProtected);
-            if (!components)
-            {
+            if (nodeTrustedComponentList->size() != 1) {
+                const string targetComponentURI = nodeTrustedComponentList->at(0); 
+
+                std::optional<nlohmann::json> targetComponent =
+                    getTrustedComponent(targetComponentURI);
+                aResp->res.jsonValue["TargetComponentURI"] = *targetComponent;
+            } else { 
+                BMCWEB_LOG_DEBUG << "Unexpected TargetComponent List Length(expect 1): " << nodeTrustedComponentList->size();
                 messages::internalError(aResp->res);
                 return;
             }
-            aResp->res.jsonValue["ComponentsProtected"] = *components;
-        }
+
+            });
+
+        //if ((componentsProtected != nullptr))
+        //{
+        //    std::optional<nlohmann::json> components =
+        //        mapObjectPathVector("Systems", "", *componentsProtected);
+        //    if (!components)
+        //    {
+        //        messages::internalError(aResp->res);
+        //        return;
+        //    }
+        //    aResp->res.jsonValue["ComponentsProtected"] = *components;
+        //}
         });
 }
 
@@ -274,7 +290,7 @@ inline void getSPDMAuthenticationData(std::shared_ptr<bmcweb::AsyncResp> aResp,
     BMCWEB_LOG_DEBUG << "Get ComponentIntegrity#SPDM#IdentyAuthentication Data";
     sdbusplus::asio::getAllProperties(
         *crow::connections::systemBus, service, objPath,
-        "xyz.openbmc_project.ComponentIntegrity.SPDM.IdentityAuthentication",
+        "xyz.openbmc_project.Inventory.Decorator.IdentityAuthentication",
         [objPath, aResp{std::move(aResp)}](
             const boost::system::error_code& ec,
             const dbus::utility::DBusPropertiesMap& properties) {
@@ -330,7 +346,7 @@ inline void getSPDMAuthenticationData(std::shared_ptr<bmcweb::AsyncResp> aResp,
         if (respStatus != nullptr && !respStatus->empty())
         {
             if (*respStatus ==
-                "xyz.openbmc_project.ComponentIntegrity.SPDM.IdentityAuthentication.VerificationStatus.Success")
+                "xyz.openbmc_project.Inventory.Decorator.IdentityAuthentication.VerificationStatus.Success")
                 aResp->res.jsonValue["ResponderVericationStatus"] = "Success";
             else
                 aResp->res.jsonValue["ResponderVericationStatus"] = "Failed";
@@ -347,13 +363,13 @@ inline void getComponentData(const std::shared_ptr<bmcweb::AsyncResp>& aResp,
     {
         for (const auto& interface : interfaceList)
         {
-            if (interface == "xyz.openbmc_project.ComponentIntegrity")
+            if (interface == "xyz.openbmc_project.Inventory.Decorator.ComponentIntegrity")
             {
                 getComponentIntegrityData(aResp, serviceName, objectPath);
             }
             // TODO: Ignore xyz.openbmc_project.ComponentIntegrity.SPDM#Requester
             else if (interface ==
-                "xyz.openbmc_project.ComponentIntegrity.SPDM.IdentityAuthentication")
+                "xyz.openbmc_project.Inventory.Decorator.IdentityAuthentication")
             {
                 getSPDMAuthenticationData(aResp, serviceName, objectPath);
             }
@@ -379,12 +395,10 @@ inline void getComponentObject(const std::shared_ptr<bmcweb::AsyncResp>& resp,
     BMCWEB_LOG_DEBUG << "Get available system component integrity resources.";
 
     // GetSubTree on all interfaces which provide info about a component_integrity.
-    constexpr std::array<std::string_view, 5> interfaces = {
-                "xyz.openbmc_project.Inventory.Item.Rot",
-                "xyz.openbmc_project.ComponentIntegrity",
-                "xyz.openbmc_project.ComponentIntegrity.SPDM",
-                "xyz.openbmc_project.ComponentIntegrity.SPDM.IdentityAuthentication",
-                "xyz.openbmc_project.ComponentIntegrity.SPDM.MeasurementSet"};
+    constexpr std::array<std::string_view, 3> interfaces = {
+                "xyz.openbmc_project.Inventory.Decorator.ComponentIntegrity",
+                "xyz.openbmc_project.Inventory.Decorator.IdentityAuthentication",
+                "xyz.openbmc_project.Inventory.Decorator.MeasurementSet"};
     dbus::utility::getSubTree(
         "/xyz/openbmc_project/ComponentIntegrity/", 0, interfaces,
         [resp, componentId, handler = std::forward<Handler>(handler)](
@@ -492,7 +506,7 @@ inline void handleComponentIntegritySPDMGetSignedMeasurementsActionPost(
 
     // GetSubTree on interfaces which provide info about certificate.
     constexpr std::array<std::string_view, 1> interfaces = {
-            "xyz.openbmc_project.ComponentIntegrity.SPDM.MeasurementSet"};
+            "xyz.openbmc_project.Inventory.Decorator.MeasurementSet"};
 
     dbus::utility::getSubTree(
         "/xyz/openbmc_project/ComponentIntegrity/", 0, interfaces,
@@ -589,7 +603,7 @@ inline void handleComponentIntegritySPDMGetSignedMeasurementsActionPost(
 
                     },
                     serviceName, ciPath,
-                    "xyz.openbmc_project.ComponentIntegrity.SPDM.MeasurementSet",
+                    "xyz.openbmc_project.Inventory.Decorator.MeasurementSet",
                     "SPDMGetSignedMeasurements", *optMeasurementIndices, *optNonce, *optSlotId);
             }
         }
