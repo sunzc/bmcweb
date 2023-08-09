@@ -44,7 +44,7 @@ namespace redfish
 {
 // Interfaces which imply a D-Bus object represents a TrustedComponent 
 constexpr std::array<std::string_view, 1> trustedComponentInterfaces = {
-    "xyz.openbmc_project.Chassis.TrustedComponent"};
+    "xyz.openbmc_project.Inventory.Item.TrustedComponent"};
 
 using TrustedComponentGetParamsVariant =
     std::variant<std::monostate, std::string,
@@ -70,7 +70,7 @@ inline void getTrustedComponentObject(const std::shared_ptr<bmcweb::AsyncResp>& 
 
     // GetSubTree on all interfaces which provide info about TrustedComponent 
     constexpr std::array<std::string_view, 1> interfaces = {
-        "xyz.openbmc_project.Chassis.TrustedComponent"};
+        "xyz.openbmc_project.Inventory.Item.TrustedComponent"};
     dbus::utility::getSubTree(
         "/xyz/openbmc_project/Chassis/", 0, interfaces,
         [resp, componentName, handler = std::forward<Handler>(handler)](
@@ -130,7 +130,7 @@ inline void getTrustedComponentInterfaceData(std::shared_ptr<bmcweb::AsyncResp> 
     BMCWEB_LOG_DEBUG << "Get TrustedComponent Interface Data";
     sdbusplus::asio::getAllProperties(
         *crow::connections::systemBus, service, objPath,
-        "xyz.openbmc_project.Chassis.TrustedComponent",
+        "xyz.openbmc_project.Inventory.Item.TrustedComponent",
         [objPath, aResp{std::move(aResp)}](
             const boost::system::error_code& ec,
             const std::vector<std::pair<std::string, TrustedComponentGetParamsVariant>> & properties) {
@@ -149,23 +149,13 @@ inline void getTrustedComponentInterfaceData(std::shared_ptr<bmcweb::AsyncResp> 
         const std::string* serialNumber = nullptr;
         const std::string* sku = nullptr;
         const std::string* uuid = nullptr;
-        const sdbusplus::message::object_path* certificates = nullptr;
-        const sdbusplus::message::object_path* activeSoftwareImage = nullptr;
-        const sdbusplus::message::object_path* integratedInto = nullptr;
-        const std::vector<sdbusplus::message::object_path>* componentsProtected = nullptr;
-        const std::vector<sdbusplus::message::object_path>* componentIntegrity = nullptr;
-        const std::vector<sdbusplus::message::object_path>* softwareImages = nullptr;
+        const std::string* certificatesLocation = nullptr;
 
         const bool success = sdbusplus::unpackPropertiesNoThrow(
-            dbus_utils::UnpackErrorPrinter(), properties, "Certificates",
-            certificates, "FirmwareVersion", firmwareVersion,
-            "ActiveSoftwareImage", activeSoftwareImage,
-            "ComponentIntegrity", componentIntegrity, "ComponentsProtected",
-            componentsProtected, "IntegratedInto", integratedInto,
-            "SoftwareImages", softwareImages, "Manufacturer",
-            manufacturer, "SerialNumber", serialNumber,
-            "SKU", sku, "TrustedComponentType", type,
-            "UUID", uuid);
+            dbus_utils::UnpackErrorPrinter(), properties,
+            "CertificatesLocation", certificatesLocation, "FirmwareVersion", firmwareVersion,
+            "Manufacturer", manufacturer, "SerialNumber", serialNumber,
+            "SKU", sku, "TrustedComponentType", type, "UUID", uuid);
 
         if (!success)
         {
@@ -173,19 +163,13 @@ inline void getTrustedComponentInterfaceData(std::shared_ptr<bmcweb::AsyncResp> 
             return;
         }
 
-        if (certificates != nullptr)
+        if (certificatesLocation != nullptr)
         {
-            // Reuse D-Bus object name for the Redfish URI
-            // Example certificates URI
-            //     "/xyz/openbmc_project/certs/systems/system01"
-            // which should maps to Redfish URI
-            //     "/redfish/v1/System/system01/Certificates/"
+            std::string systemId = *certificatesLocation;
             nlohmann::json::object_t certificatesPath;
-            std::string systemId = certificates->filename();
 
             if (systemId.empty()) {
-                BMCWEB_LOG_ERROR << "TrustedComponent contains invalid certs:"
-                                 << certificates->str;
+                BMCWEB_LOG_ERROR << "TrustedComponent contains invalid certs!";
                 messages::internalError(aResp->res);
                 return;
             }
@@ -200,96 +184,198 @@ inline void getTrustedComponentInterfaceData(std::shared_ptr<bmcweb::AsyncResp> 
             aResp->res.jsonValue["FirmwareVersion"] = *firmwareVersion;
         }
 
-        if (activeSoftwareImage != nullptr)
-        {
-            // Reuse D-Bus object name for the Redfish URI
-            // Example activeSoftwareImage URI
-            //     "/xyz/openbmc_project/software/software01"
-            // which should maps to Redfish URI
-            //     "/redfish/v1/UpdateService/SoftwareInventory/{SoftwareInventoryId}"
-            std::string softwareId = activeSoftwareImage->filename();
-            nlohmann::json::object_t imagePath;
-
-            if (softwareId.empty()) {
-                BMCWEB_LOG_ERROR << "TrustedComponent contains invalid activeSoftwareImage:"
-                                 << activeSoftwareImage->str;
-                messages::internalError(aResp->res);
-                return;
-            }
-
-            imagePath["@odata.id"] = boost::urls::format(
-                "redfish/v1/UpdateService/SoftwareInventory/{}", softwareId);
-            json["ActiveSoftwareImage"] = std::move(imagePath);
-        }
-
-        if ((componentIntegrity != nullptr))
-        {
-            std::optional<nlohmann::json> components =
-                mapObjectPathVector("ComponentIntegrity", "", *componentIntegrity);
-            if (!components)
+        // Get active software image info from associations.
+        std::string activeSoftwarePath = objPath + "/actively_running";
+        dbus::utility::getAssociationEndPoints(
+            activeSoftwarePath,
+            [aResp](
+                const boost::system::error_code& e,
+                const dbus::utility::MapperEndPoints& nodeActiveSoftwareList) {
+            if (e)
             {
-                BMCWEB_LOG_ERROR << "ComponentIntegrity is invalid.";
+                if (e.value() != EBADR)
+                {
+                    messages::internalError(aResp->res);
+                    return;
+                }
+            }
+
+            // One TrustedComponent object should be associated with one
+            // activeSoftwareImage object
+            if (nodeActiveSoftwareList.size() == 1) {
+                const std::string softwareImageURI = nodeActiveSoftwareList.at(0);
+                sdbusplus::message::object_path
+                    activeSoftwareImage(softwareImageURI);
+                std::string softwareId = activeSoftwareImage.filename();
+
+                nlohmann::json::object_t imagePath;
+
+                if (softwareId.empty()) {
+                    BMCWEB_LOG_ERROR << "TrustedComponent contains invalid activeSoftwareImage:"
+                                     << activeSoftwareImage.str;
+                    messages::internalError(aResp->res);
+                    return;
+                }
+
+                imagePath["@odata.id"] = boost::urls::format(
+                    "redfish/v1/UpdateService/SoftwareInventory/{}", softwareId);
+                aResp->res.jsonValue["ActiveSoftwareImage"] = std::move(imagePath);
+            } else { 
+                BMCWEB_LOG_DEBUG << "Unexpected ActiveSoftwareImage #objs (expecting 1): "
+                                    << nodeActiveSoftwareList.size();
                 messages::internalError(aResp->res);
                 return;
             }
-            aResp->res.jsonValue["ComponentIntegrity"] = *components;
-        }
+            });
 
-        if ((componentsProtected != nullptr))
-        {
-            std::optional<nlohmann::json> components =
-                mapObjectPathVector("Systems", "", *componentsProtected);
-            if (!components)
+        // Get ComponentIntegrity info from associations.
+        std::string componentIntegrityPath = objPath + "/reported_by";
+        dbus::utility::getAssociationEndPoints(
+            componentIntegrityPath,
+            [aResp](
+                const boost::system::error_code& e,
+                const dbus::utility::MapperEndPoints& nodeComponentIntegrityList) {
+            if (e)
             {
-                BMCWEB_LOG_ERROR << "ComponentProtected is invalid.";
-                messages::internalError(aResp->res);
-                return;
-            }
-            aResp->res.jsonValue["ComponentsProtected"] = *components;
-        }
-
-        if (integratedInto != nullptr)
-        {
-            // Reuse D-Bus object name for the Redfish URI
-            // Example integratedInto URI
-            //     "/xyz/openbmc_project/Systems/system01"
-            // which should maps to Redfish URI
-            //     "/redfish/v1/Systems/system01
-            std::string systemId = integratedInto->filename();
-            nlohmann::json::object_t integratedPath;
-
-            if (systemId.empty()) {
-                BMCWEB_LOG_ERROR << "TrustedComponent contains invalid IntegratedInto:"
-                                 << integratedInto->str;
-                messages::internalError(aResp->res);
-                return;
+                if (e.value() != EBADR)
+                {
+                    messages::internalError(aResp->res);
+                    return;
+                }
             }
 
-            integratedPath["@odata.id"] = boost::urls::format(
-                    "/redfish/v1/Systems/{}", systemId);
-            json["IntegratedInto"] = std::move(integratedPath);
-        }
+            if (nodeComponentIntegrityList.size() >= 1) {
+                std::optional<nlohmann::json> components =
+                    mapObjectPathVector("ComponentIntegrity", "", nodeComponentIntegrityList);
+                if (!components)
+                {
+                    BMCWEB_LOG_ERROR << "ComponentIntegrity is invalid.";
+                    messages::internalError(aResp->res);
+                    return;
+                }
+                aResp->res.jsonValue["ComponentIntegrity"] = *components;
+            } else { 
+                BMCWEB_LOG_DEBUG << "No ComponentIntegrity objects found!";
+                return;
+            }
+            });
 
-        if ((softwareImages != nullptr))
-        {
-            std::optional<nlohmann::json> software =
-                mapObjectPathVector("UpdateService", "SoftwareInventory", *softwareImages);
-            if (!software)
+        // Get protected components info from associations.
+        std::string protectedComponentPath = objPath + "/protecting";
+        dbus::utility::getAssociationEndPoints(
+            protectedComponentPath,
+            [aResp](
+                const boost::system::error_code& e,
+                const dbus::utility::MapperEndPoints& nodeProtectedComponentList) {
+            if (e)
             {
-                BMCWEB_LOG_ERROR << "SoftwareImages is invalid.";
-                messages::internalError(aResp->res);
+                if (e.value() != EBADR)
+                {
+                    messages::internalError(aResp->res);
+                    return;
+                }
+            }
+
+            // One TrustedComponent object may be associated with one
+            // or more protectedComponents objects
+            if (nodeProtectedComponentList.size() >= 1) {
+                std::optional<nlohmann::json> components =
+                    mapObjectPathVector("Systems", "", nodeProtectedComponentList);
+                if (!components)
+                {
+                    BMCWEB_LOG_ERROR << "TrustedComponent: no protected components found.";
+                    return;
+                }
+                aResp->res.jsonValue["ComponentsProtected"] = *components;
+            } else { 
+                BMCWEB_LOG_DEBUG << "No protected component objects found!";
                 return;
             }
-            aResp->res.jsonValue["SoftwareImages"] = *software;
-        }
+            });
+
+        // Get integratedInto info from associations.
+        std::string integratedInto = objPath + "/integrated_into";
+        dbus::utility::getAssociationEndPoints(
+            integratedInto,
+            [aResp](
+                const boost::system::error_code& e,
+                const dbus::utility::MapperEndPoints& nodeIntegratedIntoList) {
+            if (e)
+            {
+                if (e.value() != EBADR)
+                {
+                    messages::internalError(aResp->res);
+                    return;
+                }
+            }
+
+            // One TrustedComponent object should be associated with one
+            // integratedInto object
+            if (nodeIntegratedIntoList.size() == 1) {
+                const std::string integratedIntoURI = nodeIntegratedIntoList.at(0);
+                sdbusplus::message::object_path
+                    integratedIntoObj(integratedIntoURI);
+                std::string systemId = integratedIntoObj.filename();
+
+                nlohmann::json::object_t integratedPath;
+
+                if (systemId.empty()) {
+                    BMCWEB_LOG_ERROR << "TrustedComponent contains invalid IntegratedInto : "
+                                     << integratedIntoObj.str;
+                    messages::internalError(aResp->res);
+                    return;
+                }
+
+                integratedPath["@odata.id"] = boost::urls::format(
+                        "/redfish/v1/Systems/{}", systemId);
+                aResp->res.jsonValue["IntegratedInto"] = std::move(integratedPath);
+            } else { 
+                BMCWEB_LOG_ERROR << "TrustedComponent contains no IntegratedInto!";
+                return;
+            }
+            });
+
+        // Get software images info from associations.
+        std::string softwareImagesPath = objPath + "/runs";
+        dbus::utility::getAssociationEndPoints(
+            softwareImagesPath,
+            [aResp](
+                const boost::system::error_code& e,
+                const dbus::utility::MapperEndPoints& nodeSoftwareImagesList) {
+            if (e)
+            {
+                if (e.value() != EBADR)
+                {
+                    messages::internalError(aResp->res);
+                    return;
+                }
+            }
+
+            // One TrustedComponent object may be associated with one
+            // or more SoftwareImage objects
+            if (nodeSoftwareImagesList.size() >= 1) {
+                std::optional<nlohmann::json> images =
+                    mapObjectPathVector("UpdateService", "SoftwareInventory", nodeSoftwareImagesList);
+                if (!images)
+                {
+                    BMCWEB_LOG_ERROR << "SoftwareImages is invalid.";
+                    messages::internalError(aResp->res);
+                    return;
+                }
+                aResp->res.jsonValue["SoftwareImages"] = *images;
+            } else { 
+                BMCWEB_LOG_DEBUG << "No software image objects found!";
+                return;
+            }
+            });
 
         if ((type != nullptr) && !type->empty())
         {
             if (*type ==
-                "xyz.openbmc_project.Chassis.TrustedComponent.ComponentAttachType.Discrete")
+                "xyz.openbmc_project.Inventory.Item.TrustedComponent.ComponentAttachType.Discrete")
                 aResp->res.jsonValue["TrustedComponentType"] = "Discrete";
             else if (*type ==
-                "xyz.openbmc_project.Chassis.TrustedComponent.ComponentAttachType.Integrated")
+                "xyz.openbmc_project.Inventory.Item.TrustedComponent.ComponentAttachType.Integrated")
                 aResp->res.jsonValue["TrustedComponentType"] = "Integrated";
             else {
                 messages::internalError(aResp->res);
@@ -327,7 +413,7 @@ inline void getTrustedComponentData(const std::shared_ptr<bmcweb::AsyncResp>& aR
     {
         for (const auto& interface : interfaceList)
         {
-            if (interface == "xyz.openbmc_project.Chassis.TrustedComponent")
+            if (interface == "xyz.openbmc_project.Inventory.Item.TrustedComponent")
             {
                 getTrustedComponentInterfaceData(aResp, serviceName, objectPath);
             }

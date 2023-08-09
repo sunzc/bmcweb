@@ -44,7 +44,7 @@
 namespace redfish
 {
 // Interfaces which imply a D-Bus object represents a ComponentIntegrity
-constexpr std::array<std::string_view, 2> componentInterfaces = {
+constexpr std::array<std::string_view, 1> componentIntegrityInterfaces = {
     "xyz.openbmc_project.Inventory.Decorator.ComponentIntegrity"};
 
 using ComponentIntegrityGetParamsVariant =
@@ -58,23 +58,24 @@ using ComponentIntegrityGetParamsVariant =
  *
  * @param[in]       property1       Redfish property name.
  * @param[in]       property2       Optional second Redfish property name.
- * @param[in]       objPathVec      vector of object_path.
+ * @param[in]       nodeList        vector of path string.
  *
  * @return          entities        Array of Redfish URI in json.
  */
 inline std::optional<nlohmann::json> mapObjectPathVector(
     const std::string& property1,
     const std::string& property2,
-    const std::vector<sdbusplus::message::object_path>& objPathVec)
+    const std::vector<std::string>& pathList)
 {
     nlohmann::json entities = nlohmann::json::array();
 
-    for (const sdbusplus::message::object_path& path : objPathVec)
+    for (const std::string& node: pathList)
     {
+        sdbusplus::message::object_path path(node);
         std::string entityId = path.filename();
         if (entityId.empty())
         {
-            BMCWEB_LOG_ERROR << "TrustedComponent contains invalid "
+            BMCWEB_LOG_ERROR << "Invalid object path:"
                              << property1 <<" " <<property2 << ":" << path.str;
             return std::nullopt;
         }
@@ -124,9 +125,8 @@ inline std::optional<nlohmann::json>
 }
 
 inline std::optional<nlohmann::json>
-    getSystemCert(const sdbusplus::message::object_path& certPath)
+    getSystemCert(const std::string& dbusPath)
 {
-    const std::string& dbusPath = certPath.str;
     nlohmann::json::object_t certObj;
     std::string system;
     std::string cert;
@@ -230,7 +230,7 @@ inline void getComponentIntegrityData(std::shared_ptr<bmcweb::AsyncResp> aResp,
             aResp->res.jsonValue["LastUpdated"] = *lastUpdated;
         }
 
-        // Get the trusted components for this component integrity object.
+        // Get trusted components info from associations.
         std::string targetComponentPath = objPath + "/reporting";
         dbus::utility::getAssociationEndPoints(
             targetComponentPath,
@@ -241,37 +241,62 @@ inline void getComponentIntegrityData(std::shared_ptr<bmcweb::AsyncResp> aResp,
             {
                 if (e.value() != EBADR)
                 {
-                    messages::internalError(asyncResp->res);
+                    messages::internalError(aResp->res);
                     return;
                 }
             }
-            BMCWEB_LOG_DEBUG << "Finishing with " << nodeTrustedComponentList->size();
 
-            if (nodeTrustedComponentList->size() != 1) {
-                const string targetComponentURI = nodeTrustedComponentList->at(0); 
+            // One ComponentIntegrity object should be associated with one
+            // TrustedComponent object
+            if (nodeTrustedComponentList.size() == 1) {
+                const std::string targetComponentURI = nodeTrustedComponentList.at(0);
 
                 std::optional<nlohmann::json> targetComponent =
                     getTrustedComponent(targetComponentURI);
                 aResp->res.jsonValue["TargetComponentURI"] = *targetComponent;
             } else { 
-                BMCWEB_LOG_DEBUG << "Unexpected TargetComponent List Length(expect 1): " << nodeTrustedComponentList->size();
+                BMCWEB_LOG_DEBUG << "Unexpected TargetComponent #objs (expecting 1): "
+                                    << nodeTrustedComponentList.size();
                 messages::internalError(aResp->res);
                 return;
             }
 
             });
 
-        //if ((componentsProtected != nullptr))
-        //{
-        //    std::optional<nlohmann::json> components =
-        //        mapObjectPathVector("Systems", "", *componentsProtected);
-        //    if (!components)
-        //    {
-        //        messages::internalError(aResp->res);
-        //        return;
-        //    }
-        //    aResp->res.jsonValue["ComponentsProtected"] = *components;
-        //}
+        // Get protected components info from associations.
+        std::string protectedComponentPath = objPath + "/protecting";
+        dbus::utility::getAssociationEndPoints(
+            protectedComponentPath,
+            [aResp](
+                const boost::system::error_code& e,
+                const dbus::utility::MapperEndPoints& nodeProtectedComponentList) {
+            if (e)
+            {
+                if (e.value() != EBADR)
+                {
+                    messages::internalError(aResp->res);
+                    return;
+                }
+            }
+
+            // One ComponentIntegrity object may be associated with one
+            // or more protectedComponents objects
+            if (nodeProtectedComponentList.size() >= 1) {
+                std::optional<nlohmann::json> components =
+                    mapObjectPathVector("Systems", "", nodeProtectedComponentList);
+                if (!components)
+                {
+                    messages::internalError(aResp->res);
+                    return;
+                }
+                aResp->res.jsonValue["ComponentsProtected"] = *components;
+            } else { 
+                BMCWEB_LOG_DEBUG << "No protected component objects found!";
+                return;
+            }
+
+            });
+
         });
 }
 
@@ -301,46 +326,16 @@ inline void getSPDMAuthenticationData(std::shared_ptr<bmcweb::AsyncResp> aResp,
             return;
         }
 
-        nlohmann::json& json = aResp->res.jsonValue;
-
-        const sdbusplus::message::object_path* reqCert = nullptr;
-        const sdbusplus::message::object_path* respCert = nullptr;
         const std::string* respStatus = nullptr;
 
         const bool success = sdbusplus::unpackPropertiesNoThrow(
             dbus_utils::UnpackErrorPrinter(), properties,
-            "RequesterAuthentication", reqCert,
-            "ResponderAuthentication", respCert,
             "ResponderVerificationStatus", respStatus);
 
         if (!success)
         {
             messages::internalError(aResp->res);
             return;
-        }
-
-        if (reqCert != nullptr)
-        {
-            std::optional<nlohmann::json> reqCertObj =
-                getSystemCert(*reqCert);
-            if (!reqCertObj)
-            {
-                messages::internalError(aResp->res);
-                return;
-            }
-            json["RequesterAuthentication"] = *reqCertObj;
-        }
-
-        if (respCert != nullptr)
-        {
-            std::optional<nlohmann::json> respCertObj =
-                getSystemCert(*respCert);
-            if (!respCertObj)
-            {
-                messages::internalError(aResp->res);
-                return;
-            }
-            json["RequesterAuthentication"] = *respCertObj;
         }
 
         if (respStatus != nullptr && !respStatus->empty())
@@ -351,6 +346,78 @@ inline void getSPDMAuthenticationData(std::shared_ptr<bmcweb::AsyncResp> aResp,
             else
                 aResp->res.jsonValue["ResponderVericationStatus"] = "Failed";
         }
+
+        // Get associated certs objects.
+        std::string reqCertPath = objPath + "/requester_identitified_by";
+        dbus::utility::getAssociationEndPoints(
+            reqCertPath,
+            [aResp](
+                const boost::system::error_code& e,
+                const dbus::utility::MapperEndPoints& nodeReqCertList) {
+            if (e)
+            {
+                if (e.value() != EBADR)
+                {
+                    messages::internalError(aResp->res);
+                    return;
+                }
+            }
+
+            nlohmann::json& json = aResp->res.jsonValue;
+
+            // One ComponentIntegrity object should be associated with one
+            // requester certificate object
+            if (nodeReqCertList.size() == 1) {
+                const std::string certPath = nodeReqCertList.at(0);
+
+                std::optional<nlohmann::json> reqCertObj =
+                    getSystemCert(certPath);
+
+                json["RequesterAuthentication"] = *reqCertObj;
+            } else { 
+                BMCWEB_LOG_DEBUG << "Unexpected Requester Cert #objs (expecting 1): "
+                                    << nodeReqCertList.size();
+                messages::internalError(aResp->res);
+                return;
+            }
+
+            });
+
+        // Get associated response certs objects.
+        std::string respCertPath = objPath + "/responder_identitified_by";
+        dbus::utility::getAssociationEndPoints(
+            respCertPath,
+            [aResp](
+                const boost::system::error_code& e,
+                const dbus::utility::MapperEndPoints& nodeRespCertList) {
+            if (e)
+            {
+                if (e.value() != EBADR)
+                {
+                    messages::internalError(aResp->res);
+                    return;
+                }
+            }
+
+            nlohmann::json& json = aResp->res.jsonValue;
+
+            // One ComponentIntegrity object should be associated with one
+            // responder certificate object
+            if (nodeRespCertList.size() == 1) {
+                const std::string certPath = nodeRespCertList.at(0);
+
+                std::optional<nlohmann::json> respCertObj =
+                    getSystemCert(certPath);
+
+                json["RequesterAuthentication"] = *respCertObj;
+            } else { 
+                BMCWEB_LOG_DEBUG << "Unexpected Responder Cert #objs (expecting 1): "
+                                    << nodeRespCertList.size();
+                messages::internalError(aResp->res);
+                return;
+            }
+
+            });
 
         });
 }
@@ -367,7 +434,6 @@ inline void getComponentData(const std::shared_ptr<bmcweb::AsyncResp>& aResp,
             {
                 getComponentIntegrityData(aResp, serviceName, objectPath);
             }
-            // TODO: Ignore xyz.openbmc_project.ComponentIntegrity.SPDM#Requester
             else if (interface ==
                 "xyz.openbmc_project.Inventory.Decorator.IdentityAuthentication")
             {
@@ -426,8 +492,8 @@ inline void getComponentObject(const std::shared_ptr<bmcweb::AsyncResp>& resp,
             {
                 if (std::find_first_of(
                         interfaceList.begin(), interfaceList.end(),
-                        componentInterfaces.begin(),
-                        componentInterfaces.end()) != interfaceList.end())
+                        componentIntegrityInterfaces.begin(),
+                        componentIntegrityInterfaces.end()) != interfaceList.end())
                 {
                     found = true;
                     break;
@@ -469,7 +535,7 @@ inline void handleComponentIntegrityCollectionGet(
     collection_util::getCollectionMembers(
         asyncResp,
         boost::urls::url("/redfish/v1/ComponentIntegrity"),
-        componentInterfaces,
+        componentIntegrityInterfaces,
          "/xyz/openbmc_project/ComponentIntegrity");
 }
 
@@ -535,8 +601,8 @@ inline void handleComponentIntegritySPDMGetSignedMeasurementsActionPost(
     
         // All fields below are optional by DMTF DSP2046_2022.3.pdf
         std::optional<std::string> optNonce = "";
-        std::optional<uint32_t> optSlotId = 0;
-        std::optional<std::vector<uint32_t>> optMeasurementIndices;
+        std::optional<size_t> optSlotId = 0;
+        std::optional<std::vector<size_t>> optMeasurementIndices;
 
         if (!json_util::readJsonPatch(req, asyncResp->res, "SlotId",
                                       optSlotId, "MeasurementIndices",
